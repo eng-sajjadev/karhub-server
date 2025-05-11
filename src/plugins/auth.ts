@@ -57,6 +57,61 @@ auth.post("/signup", async ({ body, set }) => {
         token: t.String({ minLength: 5, maxLength: 5 }),
         email: t.String({ format: "email" })
     })
-})
+}).post("/activation/resend",
+    async ({ body, set }) => {
+        // Validate email format is already handled by Elysia's type system
+
+        // Use transaction for atomic operations
+        const result = await db.transaction(async (tx) => {
+            const [user] = await tx.select()
+                .from(users)
+                .where(
+                    and(
+                        eq(users.email, body.email),
+                        eq(users.emailVerified, false)
+                    )
+                )
+                .limit(1)
+                .execute();
+
+            if (!user) return null;
+
+            const token = await generateShortHexToken();
+
+            // Parallelize email sending and DB update
+            await Promise.all([
+                sendVerificationEmail({ email: body.email, token }),
+                tx.update(users)
+                    .set({
+                        emailVerificationToken: token,
+                        emailVerificationTokenExpires: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+                    })
+                    .where(eq(users.email, body.email))
+            ]);
+
+            return { ok: true };
+        });
+
+        if (result?.ok) {
+            return { ok: true, message: "We sent an activation token for you" };
+        }
+
+        set.status = 400;
+        return { ok: false, message: "Invalid email or account already verified" };
+    },
+    {
+        body: t.Object({
+            email: t.String({ format: "email", error: "Please provide a valid email address" })
+        }),
+        error({ code, error }) {
+            switch (code) {
+                case "VALIDATION":
+                    return { ok: false, message: error.message };
+                default:
+                    return { ok: false, message: "Internal server error" };
+            }
+        }
+    }
+);
 
 export default auth
