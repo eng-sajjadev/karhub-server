@@ -10,9 +10,11 @@
     "@libsql/client": "^0.15.4",
     "dotenv": "^16.5.0",
     "drizzle-orm": "^0.43.1",
-    "elysia": "latest"
+    "elysia": "latest",
+    "nodemailer": "^7.0.3"
   },
   "devDependencies": {
+    "@types/nodemailer": "^6.4.17",
     "bun-types": "latest",
     "drizzle-kit": "^0.31.1",
     "tsx": "^4.19.4"
