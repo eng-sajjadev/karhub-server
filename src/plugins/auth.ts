@@ -4,60 +4,178 @@ import { users } from "../db/schema";
 import { and, eq } from "drizzle-orm";
 import { sendVerificationEmail } from "../utils/email";
 import { generateShortHexToken } from "../utils/tokenGenerator";
+import jwt from "@elysiajs/jwt";
 
 const auth = new Elysia({ prefix: "/auth" })
 
-auth.post("/signup", async ({ body, set }) => {
-    try {
-        const userExist = await db.select().from(users).where(eq(users.email, body.email)).execute()
-        if (userExist.length != 0) {
-            set.status = 400
-            return { ok: false, message: "User already exist" }
-        }
-        const token = await generateShortHexToken()
-        const newUser = await db.insert(users).values({ email: body.email, passwordHash: await Bun.password.hash(body.password), emailVerificationToken: token, emailVerificationTokenExpires: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) }).returning()
-        const { id, emailVerificationToken, oauthAccessToken, emailVerificationTokenExpires, oauthProvider, oauthProviderId, passwordHash, oauthRefreshToken, ...data } = newUser[0]
-        sendVerificationEmail({ email: data.email, token })
-        set.status = 201
-        return { ok: true, message: "User created successfully , check your email account", data }
-    } catch (error: any) {
-        console.error(error.message);
-        set.status = 500
-        return { ok: false, message: "Internal error" }
-    }
-}, {
-    body: t.Object({
-        email: t.String({ format: "email" }),
-        password: t.RegExp(/^(?=.*\d)(?=.*[!@#$%^&*])(?=.*[a-z])(?=.*[A-Z]).{8,}$/)
+auth.use(
+    jwt({
+        name: 'jwt',
+        secret: 'Fischl von Luftschloss Narfidort'
     })
-}).post('/activation', async ({ body, set }) => {
-    try {
+).post("/signup",
+    async ({ body, set }) => {
+        // Use transaction for atomic operations
+        const result = await db.transaction(async (tx) => {
+            // Check if user exists (optimized with limit(1))
+            const [existingUser] = await tx.select()
+                .from(users)
+                .where(eq(users.email, body.email))
+                .limit(1)
+                .execute();
 
-        const user = await db.select().from(users).where(and(eq(users.email, body.email), eq(users.emailVerificationToken, body.token))).execute()
+            if (existingUser) {
+                set.status = 400;
+                return { ok: false, message: "Email already registered" };
+            }
 
-        if (user.length == 0) {
-            set.status = 400
-            return { ok: false, message: "Token is not valid" }
+            // Generate token and hash password in parallel
+            const [token, passwordHash] = await Promise.all([
+                generateShortHexToken(),
+                Bun.password.hash(body.password)
+            ]);
+
+            // Insert new user
+            const [newUser] = await tx.insert(users)
+                .values({
+                    email: body.email,
+                    passwordHash,
+                    emailVerificationToken: token,
+                    emailVerificationTokenExpires: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+                })
+                .returning();
+
+            // Send verification email without waiting (fire and forget)
+            sendVerificationEmail({ email: body.email, token })
+                .catch(err => console.error("Email sending failed:", err));
+
+            // Omit sensitive fields from response
+            const { passwordHash: _, emailVerificationToken: __, ...safeUserData } = newUser;
+
+            return {
+                ok: true,
+                data: safeUserData
+            };
+        });
+
+        if (result.ok) {
+            set.status = 201;
+            return {
+                ok: true,
+                message: "Account created successfully. Please check your email for verification.",
+                data: result.data
+            };
         }
-        if (new Date() > user[0].emailVerificationTokenExpires!!) {
-            set.status = 400
-            return { ok: false, message: "Token is expired" }
+
+        return result;
+    },
+    {
+        body: t.Object({
+            email: t.String({
+                format: "email",
+                error: "Please provide a valid email address"
+            }),
+            password: t.RegExp(
+                /^(?=.*\d)(?=.*[!@#$%^&*])(?=.*[a-z])(?=.*[A-Z]).{8,}$/, { error: "Password must contain at least 8 characters, one uppercase, one lowercase, one number and one special character" }
+            )
+        }),
+        error({ error }) {
+            // Handle validation errors specifically
+            if (Array.isArray(error)) {
+                return {
+                    ok: false,
+                    message: "Validation failed",
+                    errors: error.map(e => ({
+                        field: e.path,
+                        message: e.message
+                    }))
+                };
+            }
+
+            // Log unexpected errors
+            console.error("Signup error:", error);
+
+            return {
+                ok: false,
+                message: "An unexpected error occurred during registration"
+            };
         }
-
-        await db.update(users).set({ emailVerified: true, emailVerificationToken: null }).where(eq(users.email, body.email))
-        set.status = 201
-        return { ok: true, message: "Your account verified successfully" }
-    } catch (error: any) {
-        set.status = 500
-        return { ok: false, message: "Internal error" }
-
     }
-}, {
-    body: t.Object({
-        token: t.String({ minLength: 5, maxLength: 5 }),
-        email: t.String({ format: "email" })
-    })
-}).post("/activation/resend",
+).post('/activation',
+    async ({ body, set }) => {
+        const result = await db.transaction(async (tx) => {
+            const [user] = await tx.select()
+                .from(users)
+                .where(
+                    and(
+                        eq(users.email, body.email),
+                        eq(users.emailVerificationToken, body.token)
+                    )
+                )
+                .limit(1)
+                .execute();
+
+            if (!user) {
+                set.status = 400;
+                return { ok: false, message: "Invalid token or email" };
+            }
+
+            if (new Date() > user.emailVerificationTokenExpires!) {
+                set.status = 400;
+                return { ok: false, message: "Token has expired" };
+            }
+
+            await tx.update(users)
+                .set({
+                    emailVerified: true,
+                    emailVerificationToken: null,
+                    emailVerificationTokenExpires: null
+                })
+                .where(eq(users.email, body.email));
+
+            return { ok: true };
+        });
+
+        if (result.ok) {
+            set.status = 201;
+            return { ok: true, message: "Account verified successfully" };
+        }
+
+        return result;
+    },
+    {
+        body: t.Object({
+            token: t.String({
+                minLength: 5,
+                maxLength: 5,
+                error: "Token must be exactly 5 characters"
+            }),
+            email: t.String({
+                format: "email",
+                error: "Please provide a valid email address"
+            })
+        }),
+        error({ error }) {
+            // Proper error handling for Elysia
+            if (error instanceof Error) {
+                return {
+                    ok: false,
+                    message: error.message
+                };
+            }
+
+            return {
+                ok: false,
+                message: "Validation failed",
+                // If you want to include validation details:
+                details: Array.isArray(error) ? error.map(e => ({
+                    path: e.path,
+                    message: e.message
+                })) : undefined
+            };
+        }
+    }
+).post("/activation/resend",
     async ({ body, set }) => {
         // Validate email format is already handled by Elysia's type system
 
@@ -111,6 +229,95 @@ auth.post("/signup", async ({ body, set }) => {
                     return { ok: false, message: "Internal server error" };
             }
         }
+    }
+).post("/login",
+    async ({ body, set, jwt }) => {
+        try {
+            // Find user with email
+            const [user] = await db.select()
+                .from(users)
+                .where(eq(users.email, body.email))
+                .limit(1)
+                .execute();
+
+            if (!user) {
+                set.status = 401;
+                return {
+                    ok: false,
+                    message: "Invalid credentials",
+                    code: "INVALID_CREDENTIALS"
+                };
+            }
+
+            // Check verification status
+            if (!user.emailVerified) {
+                set.status = 403;
+                return {
+                    ok: false,
+                    message: "Please verify your email first",
+                    code: "UNVERIFIED_ACCOUNT"
+                };
+            }
+
+            // Handle OAuth-only users
+            if (user.oauthProvider && !user.passwordHash) {
+                set.status = 400;
+                return {
+                    ok: false,
+                    message: `Please login with ${user.oauthProvider}`,
+                    code: "OAUTH_ACCOUNT",
+                    provider: user.oauthProvider
+                };
+            }
+
+            // Verify password
+            if (!(await Bun.password.verify(body.password, user.passwordHash!))) {
+                set.status = 401;
+                return {
+                    ok: false,
+                    message: "Invalid credentials",
+                    code: "INVALID_CREDENTIALS"
+                };
+            }
+
+            // Update last login (using your schema's timestamp format)
+            await db.update(users)
+                .set({
+                    lastLoginAt: new Date(), // Unix timestamp
+                    updatedAt: new Date()
+                })
+                .where(eq(users.id, user.id));
+
+            // Generate JWT
+            const token = await jwt.sign({
+                id: user.id,
+                email: user.email
+            });
+
+            // Return safe user data
+            const { passwordHash, emailVerificationToken, oauthAccessToken, oauthRefreshToken, ...safeUserData } = user;
+
+            return {
+                ok: true,
+                message: "Login successful",
+                data: { safeUserData, token }
+            };
+
+        } catch (error) {
+            console.error("Login error:", error);
+            set.status = 500;
+            return {
+                ok: false,
+                message: "Internal server error",
+                code: "INTERNAL_ERROR"
+            };
+        }
+    },
+    {
+        body: t.Object({
+            email: t.String({ format: "email" }),
+            password: t.String()
+        })
     }
 );
 
