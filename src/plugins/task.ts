@@ -2,7 +2,7 @@
 import jwt from "@elysiajs/jwt";
 import Elysia, { t } from "elysia";
 import db from "../db";
-import { labels, projects, taskLabels, tasks } from "../db/schema";
+import { labels, projects, taskLabels, tasks, users } from "../db/schema";
 import { and, eq, inArray } from "drizzle-orm";
 
 const task = new Elysia({ prefix: "/task" })
@@ -34,8 +34,7 @@ const task = new Elysia({ prefix: "/task" })
             set.status = 401;
             return { userId: null, message: "Invalid token" }; // Handle JWT verification errors
         }
-    })
-    .post("",
+    }).post("",
         async ({ body, set, userId }) => { // Access userId directly
 
             if (!userId) {
@@ -175,7 +174,20 @@ const task = new Elysia({ prefix: "/task" })
         if (body.status !== undefined) updateData.status = body.status;
         if (body.priority !== undefined) updateData.priority = body.priority;
         if (body.dueDate !== undefined) updateData.dueDate = new Date(body.dueDate);
-        if (body.projectId !== undefined) updateData.projectId = body.projectId;
+
+        // **New Project ID Check**
+        if (body.projectId !== undefined) {
+            // Check if the project belongs to the user
+            const project = await db.select().from(projects).where(and(eq(projects.id, body.projectId), eq(projects.userId, userId)));
+
+            if (!project) {
+                set.status = 400;
+                return { ok: false, message: "Project not found or does not belong to user" };
+            }
+
+            updateData.projectId = body.projectId;
+        }
+
         if (body.labelIds !== undefined) {
             // Handle label association update (if needed)
             // For simplicity, we'll ignore label updates here, or you can extend this.
@@ -276,6 +288,33 @@ const task = new Elysia({ prefix: "/task" })
             console.error("Delete task error:", error);
             set.status = 500;
             return { ok: false, message: "Failed to delete task" };
+        }
+    }).get("/:taskId", async ({ set, params, userId }) => {
+        try {
+            const { taskId } = params;
+            if (!userId) {
+                set.status = 401;
+                return { ok: false, message: "Unauthorized" };
+            }
+
+            // Validate taskId is present and is a number
+            const id = parseInt(taskId);
+            if (isNaN(id)) {
+                set.status = 400;
+                return { ok: false, message: "Invalid task ID" };
+            }
+
+            const [task] = await db.select().from(tasks).where(and(eq(tasks.id, Number(taskId)), eq(tasks.userId, userId))).limit(1).execute()
+            if (!task) {
+                set.status = 404
+                return { ok: false, message: "Task not found" }
+            }
+            set.status = 200
+            return { ok: true, message: "Task find successfully", task }
+        } catch (error) {
+            console.error("Update task error:", error);
+            set.status = 500;
+            return { ok: false, message: "Failed to update task" };
         }
     });
 
