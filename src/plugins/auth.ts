@@ -6,12 +6,10 @@ import { sendPasswordResetEmail, sendVerificationEmail } from "../utils/email";
 import { generateShortHexToken } from "../utils/tokenGenerator";
 import jwt from "@elysiajs/jwt";
 
-const auth = new Elysia({ prefix: "/auth" })
-
-auth.use(
+const auth = new Elysia({ prefix: "/auth" }).use(
     jwt({
         name: 'jwt',
-        secret: 'Fischl von Luftschloss Narfidort'
+        secret: Bun.env.JWT_SECRET
     })
 ).post("/signup",
     async ({ body, set }) => {
@@ -508,5 +506,7 @@ auth.use(
         })
     }
 );
+
+
 
 export default auth
