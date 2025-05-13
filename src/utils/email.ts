@@ -27,7 +27,7 @@ export async function sendVerificationEmail(params: EmailVerificationParams): Pr
     });
 
     const mailOptions = {
-        from: 'no-reply@yourdomain.com',
+        from: 'Karhub-service',
         to: email,
         subject: 'Verify Your Email',
         html: `

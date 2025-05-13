@@ -152,7 +152,7 @@ const task = new Elysia({ prefix: "/task" })
             set.status = 500;
             return { ok: false, message: "Failed to fetch tasks" };
         }
-    }).patch("/:taskId", async ({ userId, params, body, set }) => {
+    }).put("/:taskId", async ({ userId, params, body, set }) => {
         const { taskId } = params;
         if (!userId) {
             set.status = 401;
@@ -166,62 +166,76 @@ const task = new Elysia({ prefix: "/task" })
             return { ok: false, message: "Invalid task ID" };
         }
 
-        // Prepare fields to update (only those provided)
-        const updateData: any = {};
-
-        if (body.title !== undefined) updateData.title = body.title;
-        if (body.description !== undefined) updateData.description = body.description;
-        if (body.status !== undefined) updateData.status = body.status;
-        if (body.priority !== undefined) updateData.priority = body.priority;
-        if (body.dueDate !== undefined) updateData.dueDate = new Date(body.dueDate);
-
-        // **New Project ID Check**
-        if (body.projectId !== undefined) {
-            // Check if the project belongs to the user
-            const project = await db.select().from(projects).where(and(eq(projects.id, body.projectId), eq(projects.userId, userId)));
-
-            if (!project) {
-                set.status = 400;
-                return { ok: false, message: "Project not found or does not belong to user" };
-            }
-
-            updateData.projectId = body.projectId;
-        }
-
-        if (body.labelIds !== undefined) {
-            // Handle label association update (if needed)
-            // For simplicity, we'll ignore label updates here, or you can extend this.
-        }
-
-        if (Object.keys(updateData).length === 0) {
-            set.status = 400;
-            return { ok: false, message: "No fields to update" };
-        }
-
         try {
-            // Verify the task belongs to the user
+            // First verify the task exists and belongs to the user
             const [task] = await db.select()
                 .from(tasks)
                 .where(and(eq(tasks.id, id), eq(tasks.userId, userId)))
-                .limit(1)
-                .execute();
+                .limit(1);
 
             if (!task) {
                 set.status = 404;
                 return { ok: false, message: "Task not found or not authorized" };
             }
 
+            // Prepare fields to update
+            const updateData: {
+                title?: string;
+                description?: string | null;
+                status?: 'todo' | 'in_progress' | 'done' | 'archived';
+                priority?: 'low' | 'medium' | 'high';
+                dueDate?: Date | null;
+                projectId?: number | null;
+                updatedAt: Date;
+            } = { updatedAt: new Date() };
+
+            // Check each field and validate projectId if provided
+            if (body.title !== undefined) updateData.title = body.title;
+            if (body.description !== undefined) updateData.description = body.description;
+            if (body.status !== undefined) updateData.status = body.status;
+            if (body.priority !== undefined) updateData.priority = body.priority;
+            if (body.dueDate !== undefined) {
+                updateData.dueDate = body.dueDate ? new Date(body.dueDate) : null;
+            }
+
+            // Special handling for projectId - verify ownership
+            if (body.projectId !== undefined) {
+                if (body.projectId === null) {
+                    // Allow setting projectId to null (unassigning from project)
+                    updateData.projectId = null;
+                } else {
+                    // Verify the new project belongs to the user
+                    const [project] = await db.select()
+                        .from(projects)
+                        .where(and(
+                            eq(projects.id, body.projectId),
+                            eq(projects.userId, userId)
+                        ))
+                        .limit(1);
+
+                    if (!project) {
+                        set.status = 403;
+                        return { ok: false, message: "Project not found or doesn't belong to you" };
+                    }
+                    updateData.projectId = body.projectId;
+                }
+            }
+
+            // Check if any updates were actually provided
+            if (Object.keys(updateData).length === 1) { // Only updatedAt was set
+                set.status = 400;
+                return { ok: false, message: "No valid fields to update" };
+            }
+
             // Perform the update
             await db.update(tasks)
                 .set(updateData)
-                .where(eq(tasks.id, id))
-                .execute();
+                .where(eq(tasks.id, id));
 
-            // Optionally, fetch the updated task to return
+            // Fetch and return the updated task
             const [updatedTask] = await db.select()
                 .from(tasks)
-                .where(eq(tasks.id, id))
-                .execute();
+                .where(eq(tasks.id, id));
 
             return { ok: true, data: updatedTask };
 
@@ -245,8 +259,8 @@ const task = new Elysia({ prefix: "/task" })
                 t.Literal('medium'),
                 t.Literal('high')
             ])),
-            dueDate: t.Optional(t.String({ format: 'date-time' })),
-            projectId: t.Optional(t.Numeric()),
+            dueDate: t.Optional(t.Union([t.String({ format: 'date-time' }), t.Null()])),
+            projectId: t.Optional(t.Union([t.Numeric(), t.Null()])),
             labelIds: t.Optional(t.Array(t.Numeric()))
         })
     }).delete("/:taskId", async ({ userId, params, set }) => {
